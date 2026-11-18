@@ -1,0 +1,49 @@
+# dreeve-garmin-elevation : import automatique Garmin Connect -> Dreeve, avec le D+ corrige par Garmin.
+#
+# Stack independante de Dreeve : seul le dossier watch de Dreeve est partage (DREEVE_WATCH_DIR
+# dans .env). Voir README.fr.md (ou README.md en anglais) pour l'installation.
+#
+#   Garmin Connect -> garmin-connector -> ./garmin/inbox
+#                  -> dreeve-garmin-elevation (altitude corrigee dans le .fit) -> dossier watch de Dreeve
+
+services:
+  # Connecteur officiel Dreeve : recupere les nouvelles sorties (.fit d'origine) toutes les heures.
+  # Il ecrit dans une inbox, PAS dans le dossier watch : Dreeve ne voit rien avant correction.
+  garmin-connector:
+    image: ghcr.io/dreeveapp/dreeve-garmin-connector:latest
+    container_name: dreeve-garmin-connector
+    restart: unless-stopped
+    environment:
+      - GARMIN_EMAIL=${GARMIN_EMAIL:?renseigner GARMIN_EMAIL dans .env}
+      - SINCE=${SINCE:-now}  # 'now' : seulement les nouvelles sorties (voir README.fr.md)
+      - FALLBACK_FORMAT=tcx  # sortie sans .fit : TCX, transmis tel quel
+      - TZ=${TZ:-Europe/Paris}
+    volumes:
+      - ./garmin/inbox:/watch
+      - ./garmin/state:/state
+      - ./garmin/tokens:/tokens
+
+  # Remplace l'altitude GPS du .fit par celle du TCX Garmin (corrigee par le relief), ecrit le
+  # D+/D- affiche par Garmin Connect, puis depose le .fit dans le dossier watch de Dreeve.
+  # Meme image que le connecteur : meme bibliotheque garminconnect, rien a construire.
+  dreeve-garmin-elevation:
+    image: ghcr.io/dreeveapp/dreeve-garmin-connector:latest
+    container_name: dreeve-garmin-elevation
+    restart: unless-stopped
+    entrypoint: ["python", "/app-fix/fixer.py"]
+    command: []
+    healthcheck:
+      disable: true          # celui de l'image interroge le connecteur, pas ce script
+    environment:
+      - TZ=${TZ:-Europe/Paris}
+      - FIX_INTERVAL=300     # un passage toutes les 5 min
+      - FIX_MIN_AGE=300      # attend 5 min apres l'arrivee d'un .fit
+      - FIX_MAX_ATTEMPTS=6   # echecs reels de telechargement avant de transmettre sans correction
+      - FIX_GIVE_UP_AGE=43200  # filet de securite : au-dela de 12 h, transmis tel quel
+      - FIX_THRESHOLD_M=3    # seuil du recalcul du D+ des tours
+    volumes:
+      - ./app:/app-fix:ro
+      - ./garmin/inbox:/inbox
+      - ./garmin/tokens:/tokens:ro
+      - ./garmin/altitude-state:/state
+      - ${DREEVE_WATCH_DIR:?renseigner DREEVE_WATCH_DIR dans .env}:/watch
